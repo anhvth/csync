@@ -3,11 +3,14 @@ Daemon module for csync.
 Implements background file watching and automatic synchronization.
 """
 
+import fnmatch
 import os
 import sys
 import time
 import threading
-from typing import Set, Optional
+from os import PathLike
+from pathlib import Path
+from typing import Optional, Set, Union
 
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler, FileSystemEvent
@@ -15,7 +18,9 @@ from rich.console import Console
 
 from .config import CsyncConfig
 from .rsync import RsyncWrapper
-from .process_manager import ProcessManager, DaemonInfo
+from .process_manager import DaemonInfo, ProcessManager
+
+RawPath = Union[str, bytes, PathLike[str]]
 
 
 class CsyncFileHandler(FileSystemEventHandler):
@@ -30,16 +35,19 @@ class CsyncFileHandler(FileSystemEventHandler):
         if event.is_directory:
             return
 
+        src_path = os.fsdecode(event.src_path)
+        normalized_path = self.daemon._coerce_path(src_path)
+
         # Skip excluded files
-        if self.daemon.should_exclude_file(event.src_path):
+        if self.daemon.should_exclude_file(normalized_path):
             return
 
         # Add to pending changes
-        self.daemon.add_pending_change(event.src_path)
+        self.daemon.add_pending_change(normalized_path)
 
         # Log the event
         event_type = event.event_type
-        rel_path = os.path.relpath(event.src_path, self.daemon.config.local_path)
+        rel_path = self.daemon._relative_path(normalized_path)
         self.console.print(f"📝 {event_type}: {rel_path}", style="dim")
 
 
@@ -51,11 +59,12 @@ class CsyncDaemon:
         self.console = console or Console()
         self.rsync_wrapper = RsyncWrapper(config)
         self.process_manager = ProcessManager(console)
+        self.local_path = Path(self.config.local_path).resolve()
 
         # Daemon state
         self.observer = Observer()
         self.is_running = False
-        self.pending_changes: Set[str] = set()
+        self.pending_changes: Set[Path] = set()
         self.last_sync_time = 0.0
         self.sync_count = 0
         self.sync_lock = threading.Lock()
@@ -66,42 +75,64 @@ class CsyncDaemon:
         self.batch_size = 100  # Max files to sync in one batch
 
         # Generate daemon signature
-        self.signature = self.process_manager.generate_signature(config.local_path)
+        self.signature = self.process_manager.generate_signature(str(self.local_path))
 
-    def should_exclude_file(self, file_path: str) -> bool:
+    def _coerce_path(self, file_path: RawPath) -> Path:
+        """Normalize incoming raw paths to absolute Path objects."""
+        if isinstance(file_path, Path):
+            path = file_path
+        else:
+            decoded = os.fsdecode(file_path)
+            path = Path(decoded)
+        if not path.is_absolute():
+            path = (self.local_path / path).resolve()
+        else:
+            path = path.resolve()
+        return path
+
+    def _relative_path(self, path: Path) -> str:
+        """Return a forward-slash relative path to the daemon root."""
+        try:
+            return path.relative_to(self.local_path).as_posix()
+        except ValueError:
+            return os.path.relpath(str(path), str(self.local_path)).replace(os.sep, "/")
+
+    def should_exclude_file(self, file_path: RawPath) -> bool:
         """Check if a file should be excluded from sync."""
-        rel_path = os.path.relpath(file_path, self.config.local_path)
+        path = self._coerce_path(file_path)
+        rel_path = self._relative_path(path)
 
         if not self.config.exclude_patterns:
             return False
 
         for pattern in self.config.exclude_patterns:
             # Simple pattern matching
-            if pattern.endswith("/"):
-                # Directory pattern
-                if rel_path.startswith(pattern.rstrip("/")):
-                    return True
-            elif "*" in pattern:
-                # Wildcard pattern
-                import fnmatch
+            normalized_pattern = pattern.replace("\\", "/")
 
-                if fnmatch.fnmatch(rel_path, pattern) or fnmatch.fnmatch(
-                    os.path.basename(file_path), pattern
+            if normalized_pattern.endswith("/"):
+                # Directory pattern
+                if rel_path.startswith(normalized_pattern.rstrip("/")):
+                    return True
+            elif "*" in normalized_pattern:
+                # Wildcard pattern
+                if fnmatch.fnmatch(rel_path, normalized_pattern) or fnmatch.fnmatch(
+                    path.name, normalized_pattern
                 ):
                     return True
             else:
                 # Exact match
-                if rel_path == pattern or os.path.basename(file_path) == pattern:
+                if rel_path == normalized_pattern or path.name == normalized_pattern:
                     return True
 
         return False
 
-    def add_pending_change(self, file_path: str) -> None:
+    def add_pending_change(self, file_path: RawPath) -> None:
         """Add a file to pending changes."""
+        path = self._coerce_path(file_path)
         with self.sync_lock:
-            self.pending_changes.add(file_path)
+            self.pending_changes.add(path)
 
-    def get_pending_changes(self) -> Set[str]:
+    def get_pending_changes(self) -> Set[Path]:
         """Get and clear pending changes."""
         with self.sync_lock:
             changes = self.pending_changes.copy()
@@ -133,19 +164,20 @@ class CsyncDaemon:
 
             if changes:
                 change_count = len(changes)
+                display_changes = sorted(changes, key=lambda p: p.as_posix())
                 self.console.print(
                     f"🔄 Syncing {change_count} changes...", style="blue"
                 )
 
                 # Show some of the changed files
                 if change_count <= 5:
-                    for change in list(changes)[:5]:
-                        rel_path = os.path.relpath(change, self.config.local_path)
+                    for change in display_changes[:5]:
+                        rel_path = self._relative_path(change)
                         self.console.print(f"  • {rel_path}", style="dim")
                 else:
-                    shown_changes = list(changes)[:3]
+                    shown_changes = display_changes[:3]
                     for change in shown_changes:
-                        rel_path = os.path.relpath(change, self.config.local_path)
+                        rel_path = self._relative_path(change)
                         self.console.print(f"  • {rel_path}", style="dim")
                     self.console.print(
                         f"  ... and {change_count - 3} more files", style="dim"
@@ -162,7 +194,7 @@ class CsyncDaemon:
 
                 # Update daemon stats
                 self.process_manager.update_daemon_stats(
-                    self.config.local_path, self.last_sync_time, self.sync_count
+                    str(self.local_path), self.last_sync_time, self.sync_count
                 )
 
                 self.console.print("✅ Sync completed successfully", style="green")
@@ -200,22 +232,22 @@ class CsyncDaemon:
             True if started successfully
         """
         # Check if already running
-        existing = self.process_manager.get_daemon_by_path(self.config.local_path)
+        existing = self.process_manager.get_daemon_by_path(str(self.local_path))
         if existing:
             self.console.print(
-                f"❌ Daemon already running for {self.config.local_path} (PID: {existing.pid})",
+                f"❌ Daemon already running for {self.local_path} (PID: {existing.pid})",
                 style="red",
             )
             return False
 
         # Setup file watching
         event_handler = CsyncFileHandler(self)
-        self.observer.schedule(event_handler, self.config.local_path, recursive=True)
+        self.observer.schedule(event_handler, str(self.local_path), recursive=True)
 
         # Create daemon info
         daemon_info = DaemonInfo(
             pid=os.getpid(),
-            local_path=self.config.local_path,
+            local_path=str(self.local_path),
             remote_target=self.config.remote_target,
             config_file=getattr(self.config, "_config_file", ".csync.cfg"),
             signature=self.signature,
@@ -248,7 +280,7 @@ class CsyncDaemon:
             # If not detaching or registration failed, just print status
             if not detach:
                 self.console.print(
-                    f"🚀 Starting daemon for {self.config.local_path} (PID: {os.getpid()})",
+                    f"🚀 Starting daemon for {self.local_path} (PID: {os.getpid()})",
                     style="green",
                 )
 
@@ -264,7 +296,7 @@ class CsyncDaemon:
         sync_thread.start()
 
         self.console.print(
-            f"👀 Watching for changes in {self.config.local_path}", style="cyan"
+            f"👀 Watching for changes in {self.local_path}", style="cyan"
         )
         self.console.print(f"🎯 Syncing to {self.config.remote_target}", style="cyan")
 

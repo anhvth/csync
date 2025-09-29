@@ -17,6 +17,7 @@ try:
     from .analyzer import analyze_project_smart
     from .daemon import start_daemon
     from .process_manager import get_process_manager
+    from .ui import configure_ui, run_ui
 
     __all__ = [
         "CsyncConfig",
@@ -25,6 +26,8 @@ try:
         "analyze_project_smart",
         "start_daemon",
         "get_process_manager",
+        "configure_ui",
+        "run_ui",
     ]
 except ImportError:
     # Fallback if optional dependencies are not available
