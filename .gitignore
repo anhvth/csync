@@ -7,3 +7,6 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Ignore csync config file
+.csync.cfg

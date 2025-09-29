@@ -281,6 +281,17 @@ def init_config(
     console.print(
         "\n💡 [yellow]Please edit the config file with your actual server details.[/yellow]"
     )
+    # TODO check if git has .csync.cfg ignored, if automatically add it to .gitignore
+    if os.path.exists(".gitignore"):
+        with open(".gitignore", "r") as f:
+            gitignore_contents = f.read()
+        if ".csync.cfg" not in gitignore_contents:
+            console.print(
+                "💡 [yellow]Consider adding .csync.cfg to your .gitignore to avoid committing sensitive info.[/yellow]"
+            )
+            with open(".gitignore", "a") as f:
+                f.write("\n# Ignore csync config file\n.csync.cfg\n")
+            console.print("✅ Added .csync.cfg to .gitignore", style="green")
 
 
 @app.command()

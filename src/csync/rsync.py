@@ -53,10 +53,6 @@ class RsyncWrapper:
         if self.config.ssh_port:
             cmd.extend(["-e", f"ssh -p {self.config.ssh_port}"])
 
-        # Ensure source ends with / for directory sync
-        if os.path.isdir(source) and not source.endswith("/"):
-            source += "/"
-
         cmd.extend([source, destination])
         return cmd
 
@@ -107,10 +103,6 @@ class RsyncWrapper:
 
         # Ensure destination directory exists
         os.makedirs(destination, exist_ok=True)
-
-        # Ensure destination ends with / for directory sync
-        if not destination.endswith("/"):
-            destination += "/"
 
         cmd = self._build_rsync_command(source, destination, dry_run)
 

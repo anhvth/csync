@@ -30,6 +30,14 @@ class CsyncConfig:
         # Ensure local_path is absolute
         self.local_path = os.path.abspath(os.path.expanduser(self.local_path))
 
+        # Ensure local_path ends with /
+        if not self.local_path.endswith("/"):
+            self.local_path += "/"
+
+        # Ensure remote_path ends with /
+        if not self.remote_path.endswith("/"):
+            self.remote_path += "/"
+
         # Set default rsync options if not provided
         if self.rsync_options is None:
             self.rsync_options = ["-av", "--progress"]
